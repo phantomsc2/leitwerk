@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import leitwerk.session as session_module
+import numpy as np
 import pytest
 from leitwerk import OptimizerSession, SchemaDiff, parameter
 
@@ -33,6 +34,22 @@ def _read_batch_size(path: Path) -> int:
     return int(status["batch_size"])
 
 
+def _read_factor_state(path: Path, group: str, key: str) -> dict[str, object]:
+    factors = _read_state(path)["factors"]
+    assert isinstance(factors, dict)
+    group_state = factors[group]
+    assert isinstance(group_state, dict)
+    state = group_state[key]
+    assert isinstance(state, dict)
+    return state
+
+
+def _read_scale(state: dict[str, object]) -> np.ndarray:
+    scale = state["scale"]
+    assert isinstance(scale, list)
+    return np.asarray(scale, dtype=float)
+
+
 class TestSessionPersistence:
     def test_session_flush_persists_initial_state_and_restores(self, tmp_path: Path) -> None:
         schema = _make_schema("SessionParams", beta=(-1.0, 2.0), alpha=(2.0, 1.5))
@@ -45,7 +62,7 @@ class TestSessionPersistence:
         assert session.schema_diff == SchemaDiff(added=["beta", "alpha"], removed=[], changed=[], unchanged=[])
         assert session.batch_size == 6
         assert session.seed == _TEST_SEED
-        assert session.mean.__class__ is schema
+        assert session.mean().__class__ is schema
         assert session.scale_marginal.__class__ is schema
         assert session.scale_marginal.alpha == 1.5
         assert session.scale_marginal.beta == 2.0
@@ -62,7 +79,7 @@ class TestSessionPersistence:
         assert restored.batch_size is None
         assert restored.seed is None
         assert restored.schema_diff == SchemaDiff(added=[], removed=[], changed=[], unchanged=["beta", "alpha"])
-        assert restored.mean == session.mean
+        assert restored.mean() == session.mean()
         assert restored.scale_marginal == session.scale_marginal
 
     def test_session_tell_auto_flushes_committed_progress(self, tmp_path: Path) -> None:
@@ -91,7 +108,7 @@ class TestSessionPersistence:
 
         assert restored.restored is True
         assert restored.schema_diff == SchemaDiff(added=["z"], removed=[], changed=[], unchanged=["x", "y"])
-        assert restored.mean.__class__ is changed_schema
+        assert restored.mean().__class__ is changed_schema
 
     def test_session_runtime_batch_size_and_seed_only_affect_future_batches(self, tmp_path: Path) -> None:
         schema = _make_schema("SessionSettings", x=(2.0, 1.5))
@@ -112,6 +129,65 @@ class TestSessionPersistence:
             restored.tell(-(params.x**2))
 
         assert _read_batch_size(path) == 4
+
+
+class TestSessionFactors:
+    def test_session_ask_with_factors_persists_factor_state(self, tmp_path: Path) -> None:
+        schema = _make_schema("FactorSessionParams", x=(2.0, 2.0))
+        path = tmp_path / "session.json"
+        session = OptimizerSession(path, schema, batch_size=4, seed=_TEST_SEED)
+
+        params = session.ask(factors={"opponent": "Sharpy", "map": "Goldenaura"})
+        session.tell(-(params.x**2))
+
+        state = _read_state(path)
+        assert np.allclose(np.diag(_read_scale(state)), np.array([2.0]))
+        opponent_scale = _read_scale(_read_factor_state(path, "opponent", '"Sharpy"'))
+        assert np.allclose(np.diag(opponent_scale), np.array([2.0]))
+        assert np.allclose(
+            np.diag(_read_scale(_read_factor_state(path, "map", '"Goldenaura"'))),
+            np.array([2.0]),
+        )
+
+    def test_session_mean_with_missing_factor_does_not_create_state(self, tmp_path: Path) -> None:
+        schema = _make_schema("MissingFactorMeanParams", x=(2.0, 1.5))
+        path = tmp_path / "session.json"
+        session = OptimizerSession(path, schema, batch_size=4, seed=_TEST_SEED)
+
+        assert session.mean(factors={"opponent": "Unknown"}) == session.mean()
+        session.flush()
+
+        state = _read_state(path)
+        assert "factors" not in state
+        assert "factor_count" not in state
+
+    def test_session_restores_factor_state(self, tmp_path: Path) -> None:
+        schema = _make_schema("RestoreFactorParams", x=(2.0, 1.5))
+        path = tmp_path / "session.json"
+        session = OptimizerSession(path, schema, batch_size=4, seed=_TEST_SEED)
+
+        first = session.ask(factors={"opponent": "Sharpy"})
+        session.tell(-(first.x**2))
+
+        restored = OptimizerSession(path, schema, batch_size=4, seed=_TEST_SEED)
+        assert restored.ask(factors={"opponent": "Sharpy"}).__class__ is schema
+
+    def test_session_flush_preserves_unknown_top_level_keys_and_factors(self, tmp_path: Path) -> None:
+        schema = _make_schema("PreserveFactorStorageParams", x=(2.0, 1.5))
+        path = tmp_path / "session.json"
+        session = OptimizerSession(path, schema, batch_size=4, seed=_TEST_SEED)
+        session.flush()
+        state = _read_state(path)
+        state["custom"] = {"keep": True}
+        state["factors"] = {"legacy": {}}
+        path.write_text(json.dumps(state), encoding="utf-8")
+
+        restored = OptimizerSession(path, schema, batch_size=4, seed=_TEST_SEED)
+        restored.flush()
+
+        saved = _read_state(path)
+        assert saved["custom"] == {"keep": True}
+        assert saved["factors"] == {"legacy": {}}
 
 
 class TestSessionFailureHandling:
