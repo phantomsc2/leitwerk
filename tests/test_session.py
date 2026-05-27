@@ -34,6 +34,12 @@ def _read_batch_size(path: Path) -> int:
     return int(status["batch_size"])
 
 
+def _read_pending_context_matches(state: dict[str, object]) -> dict[str, int]:
+    pending = state["pending_context_matches"]
+    assert isinstance(pending, dict)
+    return {str(key): int(value) for key, value in pending.items()}
+
+
 def _read_factor_state(path: Path, group: str, key: str) -> dict[str, object]:
     factors = _read_state(path)["factors"]
     assert isinstance(factors, dict)
@@ -131,16 +137,17 @@ class TestSessionPersistence:
         assert _read_batch_size(path) == 4
 
 
-class TestSessionFactors:
-    def test_session_ask_with_factors_persists_factor_state(self, tmp_path: Path) -> None:
+class TestSessionContext:
+    def test_session_ask_with_context_persists_factor_state(self, tmp_path: Path) -> None:
         schema = _make_schema("FactorSessionParams", x=(2.0, 2.0))
         path = tmp_path / "session.json"
         session = OptimizerSession(path, schema, batch_size=4, seed=_TEST_SEED)
 
-        params = session.ask(factors={"opponent": "Sharpy", "map": "Goldenaura"})
+        params = session.ask({"opponent": "Sharpy", "map": "Goldenaura"})
         session.tell(-(params.x**2))
 
         state = _read_state(path)
+        assert state["mirror_projection"] == []
         assert np.allclose(np.diag(_read_scale(state)), np.array([2.0]))
         opponent_scale = _read_scale(_read_factor_state(path, "opponent", '"Sharpy"'))
         assert np.allclose(np.diag(opponent_scale), np.array([2.0]))
@@ -149,28 +156,61 @@ class TestSessionFactors:
             np.array([2.0]),
         )
 
-    def test_session_mean_with_missing_factor_does_not_create_state(self, tmp_path: Path) -> None:
+    def test_session_mean_with_missing_context_value_does_not_create_state(self, tmp_path: Path) -> None:
         schema = _make_schema("MissingFactorMeanParams", x=(2.0, 1.5))
         path = tmp_path / "session.json"
         session = OptimizerSession(path, schema, batch_size=4, seed=_TEST_SEED)
 
-        assert session.mean(factors={"opponent": "Unknown"}) == session.mean()
+        assert session.mean({"opponent": "Unknown"}) == session.mean()
         session.flush()
 
         state = _read_state(path)
         assert "factors" not in state
-        assert "factor_count" not in state
 
-    def test_session_restores_factor_state(self, tmp_path: Path) -> None:
+    def test_session_restores_context_factor_state(self, tmp_path: Path) -> None:
         schema = _make_schema("RestoreFactorParams", x=(2.0, 1.5))
         path = tmp_path / "session.json"
         session = OptimizerSession(path, schema, batch_size=4, seed=_TEST_SEED)
 
-        first = session.ask(factors={"opponent": "Sharpy"})
+        first = session.ask({"opponent": "Sharpy"})
         session.tell(-(first.x**2))
 
         restored = OptimizerSession(path, schema, batch_size=4, seed=_TEST_SEED)
-        assert restored.ask(factors={"opponent": "Sharpy"}).__class__ is schema
+        assert restored.ask({"opponent": "Sharpy"}).__class__ is schema
+
+    def test_session_chooses_mirror_projection_from_known_context_cardinalities(self, tmp_path: Path) -> None:
+        schema = _make_schema("MirrorProjectionParams", x=(2.0, 1.5))
+        path = tmp_path / "session.json"
+        session = OptimizerSession(path, schema, batch_size=4, seed=_TEST_SEED)
+
+        for opponent, map_name in [
+            ("A", "Goldenaura"),
+            ("B", "SiteDelta"),
+            ("C", "Goldenaura"),
+            ("C", "SiteDelta"),
+        ]:
+            params = session.ask({"opponent": opponent, "map": map_name})
+            session.tell(-(params.x**2))
+
+        assert "mirror_projection" not in _read_state(path)
+
+        params = session.ask({"opponent": "A", "map": "Goldenaura"})
+        session.tell(-(params.x**2))
+
+        state = _read_state(path)
+        assert state["mirror_projection"] == ["map"]
+        [mirror_context] = _read_pending_context_matches(state)
+        assert json.loads(mirror_context) == {
+            "projection": ["map"],
+            "values": {"map": "Goldenaura"},
+        }
+
+    def test_session_rejects_non_object_context(self, tmp_path: Path) -> None:
+        schema = _make_schema("BadSessionContextParams", x=(2.0, 1.5))
+        session = OptimizerSession(tmp_path / "session.json", schema, batch_size=4, seed=_TEST_SEED)
+
+        with pytest.raises(TypeError, match="JSON object"):
+            session.ask("opponent:Sharpy")  # type: ignore[arg-type]
 
     def test_session_flush_preserves_unknown_top_level_keys_and_factors(self, tmp_path: Path) -> None:
         schema = _make_schema("PreserveFactorStorageParams", x=(2.0, 1.5))

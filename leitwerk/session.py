@@ -7,6 +7,8 @@ import os
 import tempfile
 from collections.abc import Mapping, Sequence
 from hashlib import blake2b
+from itertools import combinations
+from math import log
 from pathlib import Path
 from typing import Generic, TypeVar, cast
 
@@ -19,6 +21,7 @@ from .state import JSONLike, JSONObject
 T = TypeVar("T")
 
 _FACTORS_KEY = "factors"
+_MIRROR_PROJECTION_KEY = "mirror_projection"
 
 
 class OptimizerSession(Generic[T]):
@@ -38,6 +41,7 @@ class OptimizerSession(Generic[T]):
         restored = False
         state_base: JSONObject = {}
         factors_state: Mapping[str, object] = {}
+        mirror_projection: tuple[str, ...] | None = None
         schema_diff = _fresh_schema_diff(cast(Mapping[str, object], optimizer.save()["schema"]))
         if session_path.exists():
             state = json.loads(session_path.read_text(encoding="utf-8"))
@@ -47,6 +51,7 @@ class OptimizerSession(Generic[T]):
             restored = True
             state_base = dict(cast(JSONObject, state))
             factors_state = _read_factors_state(state.get(_FACTORS_KEY, {}))
+            mirror_projection = _read_mirror_projection(state.get(_MIRROR_PROJECTION_KEY))
             schema_diff = optimizer.load(cast(JSONObject, state))
 
         self._path = session_path
@@ -54,6 +59,7 @@ class OptimizerSession(Generic[T]):
         self._optimizer = optimizer
         self._factors = self._load_factors(factors_state)
         self._state_base = state_base
+        self._mirror_projection = mirror_projection
         self._pending_factors: tuple[tuple[str, str], ...] = ()
         self._dirty = False
         self._restored = restored
@@ -84,10 +90,10 @@ class OptimizerSession(Generic[T]):
         """Difference against the restored schema, or an empty baseline on fresh sessions."""
         return self._schema_diff
 
-    def mean(self, *, factors: Mapping[str, JSONLike] | None = None) -> T:
+    def mean(self, context: Mapping[str, JSONLike] | None = None) -> T:
         """Current optimizer mean parameters."""
         latent = self._optimizer.mean_latent
-        for name, key in _factor_items(factors):
+        for name, key, _ in _context_items(context):
             factor = self._factors.get(name, {}).get(key)
             if factor is not None:
                 latent += factor.mean_latent
@@ -98,16 +104,21 @@ class OptimizerSession(Generic[T]):
         """Current optimizer scale-vector parameters."""
         return self._optimizer.scale_marginal
 
-    def ask(self, context: JSONLike = None, *, factors: Mapping[str, JSONLike] | None = None) -> T:
+    def ask(self, context: Mapping[str, JSONLike] | None = None) -> T:
         """Reserve one sampled parameter set for evaluation."""
         self._require_clean()
-        factor_items = _factor_items(factors)
-        latent = self._optimizer.ask_latent(context)
+        context_items = _context_items(context)
         active_factors: list[tuple[str, str]] = []
-        for name, key in factor_items:
-            factor = self._factor(name, key)
-            latent += factor.ask_latent(context)
+        for name, key, _ in context_items:
+            self._factor(name, key)
             active_factors.append((name, key))
+        if context is not None and self._mirror_projection is None:
+            self._mirror_projection = self._choose_mirror_projection(context_items)
+        mirror_context = _mirror_context(context_items, self._mirror_projection)
+        latent = self._optimizer.ask_latent(mirror_context)
+        for name, key in active_factors:
+            factor = self._factor(name, key)
+            latent += factor.ask_latent(mirror_context)
         self._pending_factors = tuple(active_factors)
         return self._optimizer.decode(latent)
 
@@ -117,6 +128,8 @@ class OptimizerSession(Generic[T]):
         for name, key in self._pending_factors:
             self._factors[name][key].tell(result)
         self._pending_factors = ()
+        if report.completed_batch:
+            self._mirror_projection = None
         self._dirty = True
         self.flush()
         return report
@@ -168,12 +181,27 @@ class OptimizerSession(Generic[T]):
                 factors[name][key] = factor
         return factors
 
+    def _choose_mirror_projection(self, context_items: tuple[tuple[str, str, JSONLike], ...]) -> tuple[str, ...]:
+        target = _current_batch_size(self._optimizer) / 2
+        projections = _factor_group_projections(tuple(name for name, _, _ in context_items))
+        return min(
+            projections,
+            key=lambda projection: (
+                abs(log(_projection_cardinality(projection, self._factors) / target)),
+                projection,
+            ),
+        )
+
     def _save_state(self) -> JSONObject:
         payload = dict(self._state_base)
         payload.update(self._optimizer.save())
         factors = self._save_factors()
         if self._has_factor_storage:
             payload[_FACTORS_KEY] = factors
+        if self._mirror_projection is None:
+            payload.pop(_MIRROR_PROJECTION_KEY, None)
+        else:
+            payload[_MIRROR_PROJECTION_KEY] = list(self._mirror_projection)
         return payload
 
     @property
@@ -193,18 +221,21 @@ def _fresh_schema_diff(schema_json: Mapping[str, object]) -> SchemaDiff:
     return SchemaDiff(added=list(schema_json), removed=[], changed=[], unchanged=[])
 
 
-def _factor_items(factors: Mapping[str, JSONLike] | None) -> tuple[tuple[str, str], ...]:
-    if not factors:
+def _context_items(context: Mapping[str, JSONLike] | None) -> tuple[tuple[str, str, JSONLike], ...]:
+    if context is None:
         return ()
-    items: list[tuple[str, str]] = []
-    for name in sorted(factors):
+    if not isinstance(context, Mapping):
+        msg = "context must be a JSON object."
+        raise TypeError(msg)
+    items: list[tuple[str, str, JSONLike]] = []
+    for name in sorted(context):
         if not isinstance(name, str):
             msg = "factor group names must be strings."
             raise TypeError(msg)
-        value = factors[name]
+        value = context[name]
         if value is None:
             continue
-        items.append((name, _factor_key(value)))
+        items.append((name, _factor_key(value), value))
     return tuple(items)
 
 
@@ -214,6 +245,43 @@ def _factor_key(value: JSONLike) -> str:
     except (TypeError, ValueError) as exc:
         msg = "factor values must be JSON-serializable."
         raise TypeError(msg) from exc
+
+
+def _mirror_context(
+    context_items: tuple[tuple[str, str, JSONLike], ...],
+    projection: tuple[str, ...] | None,
+) -> Mapping[str, JSONLike] | None:
+    if projection is None:
+        return None
+    values_by_name = {name: value for name, _, value in context_items}
+    projection_json: list[JSONLike] = [name for name in projection]
+    values: dict[str, JSONLike] = {name: values_by_name[name] for name in projection if name in values_by_name}
+    return {
+        "projection": projection_json,
+        "values": values,
+    }
+
+
+def _factor_group_projections(names: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
+    return tuple(combination for size in range(len(names) + 1) for combination in combinations(names, size))
+
+
+def _projection_cardinality(
+    projection: tuple[str, ...],
+    factors: Mapping[str, Mapping[str, object]],
+) -> int:
+    cardinality = 1
+    for name in projection:
+        cardinality *= max(len(factors.get(name, {})), 1)
+    return cardinality
+
+
+def _current_batch_size(optimizer: Optimizer[T]) -> int:
+    status = optimizer.save()["status"]
+    if not isinstance(status, Mapping):
+        msg = "optimizer status is invalid."
+        raise TypeError(msg)
+    return int(cast(int | float | str, status["batch_size"]))
 
 
 def _factor_initial_state(state: JSONObject) -> JSONObject:
@@ -241,6 +309,21 @@ def _read_factors_state(value: object) -> Mapping[str, object]:
         msg = "factors must be a JSON object."
         raise TypeError(msg)
     return cast(Mapping[str, object], value)
+
+
+def _read_mirror_projection(value: object) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        msg = "mirror_projection must be a sequence of strings."
+        raise TypeError(msg)
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            msg = "mirror_projection must be a sequence of strings."
+            raise TypeError(msg)
+        out.append(item)
+    return tuple(out)
 
 
 def _read_factor_value_states(value: object, name: str) -> dict[str, JSONObject]:

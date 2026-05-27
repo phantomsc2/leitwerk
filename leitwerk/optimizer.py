@@ -247,9 +247,6 @@ class Optimizer(Generic[T]):
             return OptimizerReport(True, reservation.matched_context, status, restarted)
         return OptimizerReport(False, reservation.matched_context, XNESStatus.OK, False)
 
-    def _params_for(self, reservation: SampleReservation) -> T:
-        return self.decode(self._latent_for(reservation))
-
     def _latent_for(self, reservation: SampleReservation) -> np.ndarray:
         return self._xnes.transform(self._batch_state.batch[:, [reservation.sample_index]])[:, 0]
 
