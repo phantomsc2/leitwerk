@@ -109,17 +109,17 @@ params = opt.ask()
 MyParams(attack_threshold=-0.8312413125179872, worker_limit=59.407519238244)
 ```
 
-For deterministic evaluation, use the optimized mean instead of sampling:
+For deterministic evaluation with `OptimizerSession`, use the optimized mean instead of sampling:
 
 ```pycon
->>> opt.mean
+>>> opt.mean()
 MyParams(attack_threshold=0.0, worker_limit=66.0)
 ```
 
-Optionally, provide a JSON-valued context for the current sample:
+With `OptimizerSession`, optionally provide a context mapping for the current sample:
 
 ```py
-context = {"opponent_race": "Protoss"}  # optional
+context = {"map": "Goldenaura", "opponent": "Sharpy"}  # optional
 params = opt.ask(context)
 ```
 
@@ -153,11 +153,6 @@ Result handling:
 
 !!! question
     [How should I choose the objective?](faq.md#how-should-i-choose-the-objective)
-
-```pycon
->>> report
-OptimizerReport(completed_batch=False, matched_context=False, status=<XNESStatus.OK: 1>, restarted=False)
-```
 
 When using `OptimizerSession`, the JSON file is updated atomically on `tell`.
 An `Optimizer` can be serialized with:

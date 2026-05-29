@@ -14,23 +14,26 @@
 
 ## What context should I provide?
 
-If you are unsure what this does, provide none.
+Context is for recurring conditions where good parameters shift.
+It is a mapping: each key is a factor, and each distinct value inside that factor gets an individual offset model.
+The active offsets are added to the global model, so common learning stays shared while context-specific effects can specialize.
 
-`leitwerk` creates samples in mirrored pairs, which is a stabilizing technique to keep the gradient estimate centered.
-`ask(context=...)` lets both sides of the pair get evaluated in the same environment when possible.
-Context values are matched by exact equality after JSON normalization.
+Example:
 
-For SC2 bots, useful contexts include:
+```py
+context = {"map": "Goldenaura", "opponent": "Sharpy"}
+params = optimizer.ask(context)
+```
 
-- opponent race (consider delaying `ask` until scouting)
-- own race (for random bots)
+Good factors are stable, low-cardinality values known before `ask()`.
+For SC2 bots, useful factors include:
+
 - map name
 - opponent id
+- opponent race, if known before `ask()`
+- own race, for random bots
 
-Batch size should be tuned together with the expected number of contexts:
-
-- if batches are too small to encounter repeated contexts, matches will be rare
-- rule of thumb: batch size should be at least twice the number of distinct contexts per batch
+Avoid one-off values such as timestamps, match ids or raw scouting observations.
 
 ## How should I choose the objective?
 
@@ -48,7 +51,7 @@ For effective training, defining the objective matters more than the optimizer.
 `leitwerk` provides a canonical xNES implementation.
 Parameters are modeled as a multivariate normal distribution that is updated with natural-gradient steps.
 The covariance matrix is estimated densely, initialization is diagonal.
-Samples are generated with mirrored-orthogonal sampling for variance reduction.
+Sampling uses internal variance reduction.
 
 Bounds are modeled as unbounded latent normals with smooth bijective activations:
 
@@ -58,4 +61,3 @@ Bounds are modeled as unbounded latent normals with smooth bijective activations
 Reference Papers:
 
 - [Exponential Natural Evolution Strategies](https://people.idsia.ch/~tom/publications/xnes.pdf)
-- [Mirrored Orthogonal Sampling with Pairwise Selection in Evolution Strategies](https://www.researchgate.net/publication/266087889_Mirrored_Orthogonal_Sampling_with_Pairwise_Selection_in_Evolution_Strategies)
