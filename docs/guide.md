@@ -42,6 +42,9 @@ class MyParams:
     Use nested schemas to group parameters together.
     `leitwerk` understands tree structures.
 
+!!! note
+    Dataclass fields that are not parameters are passed through as constants.
+
 ## 2. Create the Optimizer
 
 *~ Engine Ignition ~*

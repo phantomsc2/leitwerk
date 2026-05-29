@@ -49,6 +49,7 @@ class SchemaSpec(Generic[T]):
 
     fields: tuple[FieldSpec, ...]
     instantiate: Callable[[Mapping[SchemaPath, float]], T]
+    instantiate_scale: Callable[[Mapping[SchemaPath, float]], T]
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -95,3 +96,7 @@ class SchemaSpec(Generic[T]):
             for field_spec, value in zip(self.fields, values, strict=True)
         }
         return self.instantiate(leaf_values)
+
+    def build_scales(self, values: np.ndarray) -> T:
+        leaf_values = {field_spec.path: float(value) for field_spec, value in zip(self.fields, values, strict=True)}
+        return self.instantiate_scale(leaf_values)
