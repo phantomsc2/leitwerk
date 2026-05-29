@@ -147,13 +147,40 @@ class TestSessionContext:
         session.tell(-(params.x**2))
 
         state = _read_state(path)
+        expected_scale = np.array([2.0 / np.sqrt(3.0)])
         assert state["mirror_projection"] == []
-        assert np.allclose(np.diag(_read_scale(state)), np.array([2.0]))
+        assert "factor_count" not in state
+        base_scale = _read_scale(state)
+        assert np.allclose(np.diag(base_scale), expected_scale)
         opponent_scale = _read_scale(_read_factor_state(path, "opponent", '"Sharpy"'))
-        assert np.allclose(np.diag(opponent_scale), np.array([2.0]))
+        map_scale = _read_scale(_read_factor_state(path, "map", '"Goldenaura"'))
+        assert np.allclose(np.diag(opponent_scale), expected_scale)
+        assert np.allclose(np.diag(map_scale), expected_scale)
+        total_covariance = base_scale @ base_scale.T + opponent_scale @ opponent_scale.T + map_scale @ map_scale.T
+        assert np.allclose(total_covariance, np.diag([4.0]))
+
+    def test_late_context_splits_learned_baseline_scale_with_new_factors(self, tmp_path: Path) -> None:
+        schema = _make_schema("LateContextParams", x=(2.0, 2.0))
+        path = tmp_path / "session.json"
+        session = OptimizerSession(path, schema, batch_size=4, seed=_TEST_SEED)
+
+        params = session.ask()
+        session.tell(-(params.x**2))
+        session._optimizer._xnes.scale_global = 0.5
+
+        params = session.ask({"opponent": "Sharpy", "map": "Goldenaura"})
+        session.tell(-(params.x**2))
+
+        state = _read_state(path)
+        expected_scale = np.array([0.5 / np.sqrt(3.0)])
+        assert np.allclose(np.diag(_read_scale(state)), expected_scale)
+        assert np.allclose(
+            np.diag(_read_scale(_read_factor_state(path, "opponent", '"Sharpy"'))),
+            expected_scale,
+        )
         assert np.allclose(
             np.diag(_read_scale(_read_factor_state(path, "map", '"Goldenaura"'))),
-            np.array([2.0]),
+            expected_scale,
         )
 
     def test_session_mean_with_missing_context_value_does_not_create_state(self, tmp_path: Path) -> None:

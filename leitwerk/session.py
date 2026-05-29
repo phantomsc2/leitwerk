@@ -8,7 +8,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from hashlib import blake2b
 from itertools import combinations
-from math import log
+from math import log, sqrt
 from pathlib import Path
 from typing import Generic, TypeVar, cast
 
@@ -108,16 +108,20 @@ class OptimizerSession(Generic[T]):
         """Reserve one sampled parameter set for evaluation."""
         self._require_clean()
         context_items = _context_items(context)
+        factor_count = len(context_items)
+        factor_scale = _new_factor_scale(self._optimizer.save(), factor_count) if factor_count else np.eye(0)
+        if factor_count:
+            self._scale_baseline_for_first_context(factor_count)
         active_factors: list[tuple[str, str]] = []
         for name, key, _ in context_items:
-            self._factor(name, key)
+            self._factor(name, key, factor_scale)
             active_factors.append((name, key))
         if context is not None and self._mirror_projection is None:
             self._mirror_projection = self._choose_mirror_projection(context_items)
         mirror_context = _mirror_context(context_items, self._mirror_projection)
         latent = self._optimizer.ask_latent(mirror_context)
         for name, key in active_factors:
-            factor = self._factor(name, key)
+            factor = self._factor(name, key, factor_scale)
             latent += factor.ask_latent(mirror_context)
         self._pending_factors = tuple(active_factors)
         return self._optimizer.decode(latent)
@@ -146,21 +150,27 @@ class OptimizerSession(Generic[T]):
             msg = "Session has unflushed committed state. Call flush() before ask()."
             raise RuntimeError(msg)
 
-    def _factor(self, name: str, key: str) -> Optimizer[T]:
+    def _scale_baseline_for_first_context(self, factor_count: int) -> None:
+        if any(self._factors.values()):
+            return
+        state = _scaled_distribution_state(self._optimizer.save(), _component_scale_multiplier(factor_count))
+        self._optimizer.load(state)
+
+    def _factor(self, name: str, key: str, scale: np.ndarray) -> Optimizer[T]:
         group = self._factors.setdefault(name, {})
         factor = group.get(key)
         if factor is None:
-            factor = self._new_factor(name, key)
+            factor = self._new_factor(name, key, scale)
             group[key] = factor
         return factor
 
-    def _new_factor(self, name: str, key: str) -> Optimizer[T]:
+    def _new_factor(self, name: str, key: str, scale: np.ndarray) -> Optimizer[T]:
         factor = Optimizer(
             self._schema,
             batch_size=self._optimizer.batch_size,
             seed=_factor_seed(self._optimizer.seed, name, key),
         )
-        factor.load(_factor_initial_state(factor.save()))
+        factor.load(_factor_initial_state(factor.save(), scale))
         return factor
 
     def _load_factors(self, factors_state: Mapping[str, object]) -> dict[str, dict[str, Optimizer[T]]]:
@@ -284,13 +294,36 @@ def _current_batch_size(optimizer: Optimizer[T]) -> int:
     return int(cast(int | float | str, status["batch_size"]))
 
 
-def _factor_initial_state(state: JSONObject) -> JSONObject:
+def _component_scale_multiplier(factor_count: int) -> float:
+    return 1.0 / sqrt(factor_count + 1)
+
+
+def _state_scale(state: JSONObject) -> np.ndarray:
+    scale = state["scale"]
+    if not isinstance(scale, list):
+        msg = "fresh optimizer state is invalid."
+        raise TypeError(msg)
+    return np.asarray(scale, dtype=float)
+
+
+def _new_factor_scale(baseline_state: JSONObject, factor_count: int) -> np.ndarray:
+    return _state_scale(baseline_state) * _component_scale_multiplier(factor_count)
+
+
+def _scaled_distribution_state(state: JSONObject, scale_multiplier: float) -> JSONObject:
+    out = dict(state)
+    out["scale"] = (_state_scale(state) * scale_multiplier).tolist()
+    return out
+
+
+def _factor_initial_state(state: JSONObject, scale: np.ndarray) -> JSONObject:
     mean = state["mean"]
     if not isinstance(mean, list):
         msg = "fresh optimizer state is invalid."
         raise TypeError(msg)
     out = dict(state)
     out["mean"] = [0.0] * len(mean)
+    out["scale"] = np.asarray(scale, dtype=float).tolist()
     out["batch"] = []
     out["results"] = []
     out["pending_context_matches"] = {}
