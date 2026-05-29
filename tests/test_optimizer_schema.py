@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import make_dataclass
+from dataclasses import dataclass, make_dataclass
 from typing import Annotated, cast
 
 import numpy as np
 import pytest
-from leitwerk import Optimizer, Parameter, SchemaDiff, parameter
+from leitwerk import Optimizer, OptimizerReport, Parameter, SchemaDiff, XNESStatus, parameter
 
 from ._optimizer_helpers import (
     _initialized_optimizer,
@@ -23,6 +23,7 @@ from ._optimizer_helpers import (
     _read_scale,
     _read_schema,
     _read_schema_names,
+    _read_status,
     _softplus_inverse,
 )
 
@@ -280,6 +281,70 @@ def test_nested_schema_flattens_leaf_names_and_rebuilds_dataclasses() -> None:
     assert params.alpha < 3.0
 
 
+def test_dataclass_schema_passes_through_constant_fields_and_zeros_scale() -> None:
+    combat = make_dataclass(
+        "ConstantCombatParameters",
+        [
+            ("attack_threshold", float, parameter(mean=2.0, scale=3.0, min=0.0)),
+            ("retreat_threshold", float, 1.0),
+        ],
+        frozen=True,
+        slots=True,
+    )
+    schema = make_dataclass(
+        "MixedConstantParameters",
+        [
+            ("combat", combat),
+            ("gas_priority", float, parameter(mean=0.5, scale=0.25, min=0.0, max=1.0)),
+            ("label", str, "fixed"),
+        ],
+        frozen=True,
+        slots=True,
+    )
+
+    optimizer = _initialized_optimizer(schema, batch_size=6)
+    assert _read_schema_names(optimizer.save()) == ["combat.attack_threshold", "gas_priority"]
+
+    mean = optimizer.mean
+    assert mean.__class__ is schema
+    assert mean.combat.__class__ is combat
+    assert mean.combat.attack_threshold == 2.0
+    assert mean.combat.retreat_threshold == 1.0
+    assert mean.gas_priority == 0.5
+    assert mean.label == "fixed"
+
+    scale_marginal = optimizer.scale_marginal
+    assert scale_marginal.__class__ is schema
+    assert scale_marginal.combat.__class__ is combat
+    assert scale_marginal.combat.attack_threshold == pytest.approx(3.0)
+    assert scale_marginal.combat.retreat_threshold == 0.0
+    assert scale_marginal.gas_priority == 0.25
+    assert scale_marginal.label == 0.0
+
+    params = optimizer.ask()
+    assert params.__class__ is schema
+    assert params.combat.retreat_threshold == 1.0
+    assert params.label == "fixed"
+    assert params.combat.attack_threshold > 0.0
+    assert 0.0 < params.gas_priority < 1.0
+
+
+def test_all_constant_dataclass_schema_is_noop_optimizer() -> None:
+    @dataclass(frozen=True, slots=True)
+    class ConstantParameters:
+        fixed: float = 1.0
+        label: str = "hold"
+
+    optimizer = _optimizer(ConstantParameters, batch_size=4)
+
+    assert optimizer.mean == ConstantParameters()
+    scale_marginal = optimizer.scale_marginal
+    assert scale_marginal.fixed == 0.0
+    assert scale_marginal.label == 0.0
+    assert optimizer.ask() == ConstantParameters()
+    assert optimizer.tell(1.0) == OptimizerReport(False, False, XNESStatus.OK, False)
+
+
 def test_parameter_helper_builds_dataclass_fields() -> None:
     schema = make_dataclass(
         "HelperParameters",
@@ -339,6 +404,36 @@ def test_nested_mapping_schema_flattens_leaf_names_and_rebuilds_plain_dicts() ->
     assert params["combat"]["attack_threshold"] > 0.0
     assert 0.0 < params["mining"]["gas_priority"] < 1.0
     assert params["alpha"] < 3.0
+
+
+def test_mapping_schema_passes_through_constant_leaf_values_and_zeros_scale() -> None:
+    marker: list[str] = ["shared"]
+    schema = {
+        "x": Parameter(mean=1.0, scale=0.5),
+        "fixed": 1.0,
+        "nested": {
+            "marker": marker,
+            "y": Parameter(mean=2.0, scale=3.0),
+        },
+    }
+
+    optimizer = _initialized_optimizer(schema, batch_size=6)
+    assert _read_schema_names(optimizer.save()) == ["x", "nested.y"]
+
+    mean = optimizer.mean
+    assert mean["x"] == 1.0
+    assert mean["fixed"] == 1.0
+    assert cast(dict[str, object], mean["nested"])["marker"] is marker
+    assert cast(dict[str, object], mean["nested"])["y"] == 2.0
+
+    scale_marginal = optimizer.scale_marginal
+    assert scale_marginal == {"x": 0.5, "fixed": 0.0, "nested": {"marker": 0.0, "y": 3.0}}
+
+    params = optimizer.ask()
+    assert params["fixed"] == 1.0
+    assert cast(dict[str, object], params["nested"])["marker"] is marker
+    assert isinstance(params["x"], float)
+    assert isinstance(cast(dict[str, object], params["nested"])["y"], float)
 
 
 def test_mapping_schema_order_follows_traversal_and_respects_insertion_order() -> None:
@@ -401,9 +496,62 @@ def test_mapping_schema_state_save_load_roundtrip() -> None:
     assert _read_results(loaded) == _read_results(state)
 
 
-def test_mapping_schema_rejects_non_parameter_leaf_values() -> None:
-    with pytest.raises(TypeError, match=r"must be Parameter\(\.\.\.\) or a nested mapping"):
-        Optimizer({"x": 1.0})
+def test_all_constant_mapping_schema_is_noop_optimizer() -> None:
+    schema = {
+        "fixed": 1.0,
+        "nested": {
+            "label": "hold",
+        },
+    }
+    optimizer = _optimizer(schema, batch_size=4)
+
+    assert optimizer.mean == schema
+    assert optimizer.scale_marginal == {"fixed": 0.0, "nested": {"label": 0.0}}
+    state = optimizer.save()
+    assert _read_schema(state) == {}
+    assert _read_mean(state).shape == (0,)
+    assert _read_scale(state).shape == (0,)
+    assert _read_batch(state).shape == (0,)
+    assert _read_results(state) == []
+    assert _read_status(state)["num_parameters"] == 0
+    assert _read_status(state)["batch_size"] == 0
+
+    with pytest.raises(RuntimeError, match="No pending ask"):
+        optimizer.tell(1.0)
+
+    assert optimizer.ask(context={"case": 1}) == schema
+    with pytest.raises(RuntimeError, match="Pending ask"):
+        optimizer.ask()
+
+    assert optimizer.tell(1.0) == OptimizerReport(False, False, XNESStatus.OK, False)
+    progressed_state = optimizer.save()
+    progressed_status = _read_status(progressed_state)
+    assert progressed_status["num_samples"] == 1
+    assert progressed_status["num_batches"] == 0
+    assert progressed_status["num_restarts"] == 0
+    assert progressed_status["batch_progress"] == 0.0
+    assert progressed_status["batch_size"] == 0
+
+    restored = _optimizer(schema, batch_size=4)
+    assert restored.load(progressed_state) == SchemaDiff(added=[], removed=[], changed=[], unchanged=[])
+    assert restored.ask() == schema
+
+
+def test_load_treats_parameters_changed_to_constants_as_removed() -> None:
+    base_schema = _make_identity_schema("LearnedToConstantBase", x=(2.0, 1.5), y=(-1.0, 0.7))
+    base_state = _initialized_state(base_schema, batch_size=4)
+
+    schema = {
+        "x": 10.0,
+        "y": Parameter(mean=-1.0, scale=0.7),
+    }
+    optimizer = _optimizer(schema, batch_size=4)
+    assert optimizer.load(base_state) == SchemaDiff(added=[], removed=["x"], changed=[], unchanged=["y"])
+
+    state = optimizer.save()
+    assert _read_schema_names(state) == ["y"]
+    assert optimizer.mean["x"] == 10.0
+    assert optimizer.scale_marginal["x"] == 0.0
 
 
 def test_mapping_schema_rejects_leaf_name_shadowing() -> None:

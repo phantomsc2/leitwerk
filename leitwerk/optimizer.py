@@ -162,7 +162,9 @@ class Optimizer(Generic[T]):
         self._num_batches = restored.num_batches
         self._num_restarts = restored.num_restarts
 
-        if restored.batch.shape[1] == 0:
+        if self._schema.dim == 0:
+            self._batch_state.reset(np.zeros((0, 0), dtype=float))
+        elif restored.batch.shape[1] == 0:
             self._sample_batch()
         else:
             self._batch_state.restore(
@@ -177,11 +179,23 @@ class Optimizer(Generic[T]):
         if mean is not None:
             reset_mean = np.array(mean, dtype=float, copy=True)
         self._xnes = XNES(reset_mean, scale)
-        self._sample_batch()
+        if self._schema.dim == 0:
+            self._batch_state.reset(np.zeros((0, 0), dtype=float))
+            self._pending_reservation = None
+        else:
+            self._sample_batch()
 
     def ask(self, context: JSONLike = None) -> T:
         """Reserve one sampled parameter set for one evaluation."""
         self._require_idle("ask")
+        if self._schema.dim == 0:
+            self._pending_reservation = SampleReservation(
+                sample_index=0,
+                context=_normalize_context(context),
+                matched_context=False,
+            )
+            return self._schema.build_params(self._xnes.mean)
+
         self._pending_reservation = self._reserve(_normalize_context(context))
         return self._params_for(self._pending_reservation)
 
@@ -197,13 +211,7 @@ class Optimizer(Generic[T]):
     @property
     def scale_marginal(self) -> T:
         """Current scale-vector parameters in the schema's runtime shape."""
-        scale_marginal = self._xnes.scale_marginal
-        return self._schema.instantiate(
-            {
-                field_spec.path: float(scale)
-                for field_spec, scale in zip(self._schema.fields, scale_marginal, strict=True)
-            },
-        )
+        return self._schema.build_scales(self._xnes.scale_marginal)
 
     @property
     def batch_size(self) -> int | None:
@@ -218,6 +226,12 @@ class Optimizer(Generic[T]):
     def tell(self, result: float | Sequence[float] | np.ndarray) -> OptimizerReport:
         """Submit the objective result for the pending sample."""
         reservation = self._require_pending()
+        if self._schema.dim == 0:
+            _normalize_result(result)
+            self._num_samples += 1
+            self._pending_reservation = None
+            return OptimizerReport(False, reservation.matched_context, XNESStatus.OK, False)
+
         report = self._tell_reservation(reservation, result)
         self._pending_reservation = None
         return report
