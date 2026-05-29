@@ -47,6 +47,20 @@ def build_scalar_builder(path: SchemaPath) -> BuildFn:
     return build_leaf
 
 
+def build_constant_builder(value: object) -> BuildFn:
+    def build_leaf(values: Mapping[SchemaPath, float]) -> object:
+        return value
+
+    return build_leaf
+
+
+def build_zero_builder() -> BuildFn:
+    def build_leaf(values: Mapping[SchemaPath, float]) -> float:
+        return 0.0
+
+    return build_leaf
+
+
 def field_name(field_spec: FieldSpec) -> str:
     return field_spec.name
 

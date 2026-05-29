@@ -295,6 +295,8 @@ def _as_finite_vector(value: object, size: int, name: str) -> np.ndarray:
 
 def _as_finite_matrix(value: object, shape: tuple[int, int], name: str) -> np.ndarray:
     matrix = _as_finite_array(value, name)
+    if shape == (0, 0) and matrix.ndim == 1 and matrix.size == 0:
+        return np.zeros((0, 0), dtype=float)
     if matrix.ndim != 2 or matrix.shape != shape:
         msg = f"{name} must have shape {shape}."
         raise ValueError(msg)
