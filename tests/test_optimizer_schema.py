@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, make_dataclass
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 import numpy as np
 import pytest
@@ -251,33 +251,48 @@ def test_nested_schema_flattens_leaf_names_and_rebuilds_dataclasses() -> None:
     optimizer = _optimizer(schema, batch_size=6)
     assert _read_schema_names(optimizer.save()) == expected_names
 
-    mean = optimizer.mean
+    mean = cast(Any, optimizer.mean)
     assert mean.__class__ is schema
-    assert mean.combat.__class__ is combat
-    assert mean.mining.__class__ is mining
+    mean = cast(Any, mean)
+    mean_combat = cast(Any, mean.combat)
+    mean_mining = cast(Any, mean.mining)
+    assert mean_combat.__class__ is combat
+    assert mean_mining.__class__ is mining
+    mean_combat = cast(Any, mean_combat)
+    mean_mining = cast(Any, mean_mining)
     assert mean.alpha == 1.5
-    assert mean.combat.attack_threshold == 2.0
-    assert mean.combat.retreat_threshold == -1.0
-    assert mean.mining.gas_priority == 0.5
+    assert mean_combat.attack_threshold == 2.0
+    assert mean_combat.retreat_threshold == -1.0
+    assert mean_mining.gas_priority == 0.5
 
-    scale_marginal = optimizer.scale_marginal
+    scale_marginal = cast(Any, optimizer.scale_marginal)
     assert scale_marginal.__class__ is schema
-    assert scale_marginal.combat.__class__ is combat
-    assert scale_marginal.mining.__class__ is mining
+    scale_marginal = cast(Any, scale_marginal)
+    scale_combat = cast(Any, scale_marginal.combat)
+    scale_mining = cast(Any, scale_marginal.mining)
+    assert scale_combat.__class__ is combat
+    assert scale_mining.__class__ is mining
+    scale_combat = cast(Any, scale_combat)
+    scale_mining = cast(Any, scale_mining)
     assert scale_marginal.alpha == 0.25
-    assert scale_marginal.combat.attack_threshold == pytest.approx(3.0)
-    assert scale_marginal.combat.retreat_threshold == 2.0
-    assert scale_marginal.mining.gas_priority == 1.0
+    assert scale_combat.attack_threshold == pytest.approx(3.0)
+    assert scale_combat.retreat_threshold == 2.0
+    assert scale_mining.gas_priority == 1.0
 
-    params = optimizer.ask()
+    params = cast(Any, optimizer.ask())
     assert params.__class__ is schema
-    assert params.combat.__class__ is combat
-    assert params.mining.__class__ is mining
+    params = cast(Any, params)
+    params_combat = cast(Any, params.combat)
+    params_mining = cast(Any, params.mining)
+    assert params_combat.__class__ is combat
+    assert params_mining.__class__ is mining
+    params_combat = cast(Any, params_combat)
+    params_mining = cast(Any, params_mining)
     assert isinstance(params.alpha, float)
-    assert isinstance(params.combat.retreat_threshold, float)
-    assert isinstance(params.mining.gas_priority, float)
-    assert params.combat.attack_threshold > 0.0
-    assert 0.0 < params.mining.gas_priority < 1.0
+    assert isinstance(params_combat.retreat_threshold, float)
+    assert isinstance(params_mining.gas_priority, float)
+    assert params_combat.attack_threshold > 0.0
+    assert 0.0 < params_mining.gas_priority < 1.0
     assert params.alpha < 3.0
 
 
@@ -305,24 +320,31 @@ def test_dataclass_schema_passes_through_constant_fields_and_zeros_scale() -> No
     optimizer = _initialized_optimizer(schema, batch_size=6)
     assert _read_schema_names(optimizer.save()) == ["combat.attack_threshold", "gas_priority"]
 
-    mean = optimizer.mean
+    mean = cast(Any, optimizer.mean)
     assert mean.__class__ is schema
-    assert mean.combat.__class__ is combat
-    assert mean.combat.attack_threshold == 2.0
-    assert mean.combat.retreat_threshold == 1.0
+    mean = cast(Any, mean)
+    mean_combat = cast(Any, mean.combat)
+    assert mean_combat.__class__ is combat
+    mean_combat = cast(Any, mean_combat)
+    assert mean_combat.attack_threshold == 2.0
+    assert mean_combat.retreat_threshold == 1.0
     assert mean.gas_priority == 0.5
     assert mean.label == "fixed"
 
-    scale_marginal = optimizer.scale_marginal
+    scale_marginal = cast(Any, optimizer.scale_marginal)
     assert scale_marginal.__class__ is schema
-    assert scale_marginal.combat.__class__ is combat
-    assert scale_marginal.combat.attack_threshold == pytest.approx(3.0)
-    assert scale_marginal.combat.retreat_threshold == 0.0
+    scale_marginal = cast(Any, scale_marginal)
+    scale_combat = cast(Any, scale_marginal.combat)
+    assert scale_combat.__class__ is combat
+    scale_combat = cast(Any, scale_combat)
+    assert scale_combat.attack_threshold == pytest.approx(3.0)
+    assert scale_combat.retreat_threshold == 0.0
     assert scale_marginal.gas_priority == 0.25
     assert scale_marginal.label == 0.0
 
-    params = optimizer.ask()
+    params = cast(Any, optimizer.ask())
     assert params.__class__ is schema
+    params = cast(Any, params)
     assert params.combat.retreat_threshold == 1.0
     assert params.label == "fixed"
     assert params.combat.attack_threshold > 0.0
