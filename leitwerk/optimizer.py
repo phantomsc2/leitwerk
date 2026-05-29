@@ -198,7 +198,7 @@ class Optimizer(Generic[T]):
                 context=_normalize_context(context),
                 matched_context=False,
             )
-            return self._schema.build_params(self._xnes.mean)
+            return np.array(self._xnes.mean, dtype=float, copy=True)
 
         self._pending_reservation = self._reserve(_normalize_context(context))
         return self._latent_for(self._pending_reservation)
