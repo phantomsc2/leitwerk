@@ -71,7 +71,13 @@ def restore_optimizer_state(
     num_samples, num_batches, num_restarts = _validate_status(_require_field(state_obj, "status"))
 
     schema_diff = schema.diff(saved_schema)
-    mean, scale = _reconcile_distribution_state(saved_names, schema_diff.unchanged, mean, scale, schema)
+    mean, scale = _reconcile_distribution_state(
+        saved_names,
+        schema_diff.unchanged,
+        mean,
+        scale,
+        schema,
+    )
     if batch.shape[1] != 0:
         batch = _reconcile_batch_state(saved_names, schema_diff, batch, results, schema)
 

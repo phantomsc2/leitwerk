@@ -13,6 +13,7 @@ It offers:
 
 - parameters as plain dataclasses in your code
 - JSON checkpoints you can inspect and resume
+- context factors for recurring conditions such as map or opponent
 - schema reconciliation, so you can keep developing and retain progress
 
 ## Links

@@ -187,6 +187,10 @@ class Optimizer(Generic[T]):
 
     def ask(self, context: JSONLike = None) -> T:
         """Reserve one sampled parameter set for one evaluation."""
+        return self.decode(self.ask_latent(context))
+
+    def ask_latent(self, context: JSONLike = None) -> np.ndarray:
+        """Reserve one latent sampled vector for one evaluation."""
         self._require_idle("ask")
         if self._schema.dim == 0:
             self._pending_reservation = SampleReservation(
@@ -194,10 +198,14 @@ class Optimizer(Generic[T]):
                 context=_normalize_context(context),
                 matched_context=False,
             )
-            return self._schema.build_params(self._xnes.mean)
+            return np.array(self._xnes.mean, dtype=float, copy=True)
 
         self._pending_reservation = self._reserve(_normalize_context(context))
-        return self._params_for(self._pending_reservation)
+        return self._latent_for(self._pending_reservation)
+
+    def decode(self, values: np.ndarray) -> T:
+        """Decode one latent vector into the schema's runtime shape."""
+        return self._schema.build_params(np.asarray(values, dtype=float))
 
     @property
     def mean(self) -> T:
@@ -206,7 +214,12 @@ class Optimizer(Generic[T]):
         For transformed parameters this is the transformed latent mean, used as
         a convenient center rather than the exact expected value.
         """
-        return self._schema.build_params(self._xnes.mean)
+        return self.decode(self._xnes.mean)
+
+    @property
+    def mean_latent(self) -> np.ndarray:
+        """Current latent mean vector."""
+        return np.array(self._xnes.mean, dtype=float, copy=True)
 
     @property
     def scale_marginal(self) -> T:
@@ -248,9 +261,8 @@ class Optimizer(Generic[T]):
             return OptimizerReport(True, reservation.matched_context, status, restarted)
         return OptimizerReport(False, reservation.matched_context, XNESStatus.OK, False)
 
-    def _params_for(self, reservation: SampleReservation) -> T:
-        sample = self._xnes.transform(self._batch_state.batch[:, [reservation.sample_index]])[:, 0]
-        return self._schema.build_params(sample)
+    def _latent_for(self, reservation: SampleReservation) -> np.ndarray:
+        return self._xnes.transform(self._batch_state.batch[:, [reservation.sample_index]])[:, 0]
 
     def _sample_batch(self) -> None:
         batch = self._xnes.sample(self._batch_size, self._batch_rng())
