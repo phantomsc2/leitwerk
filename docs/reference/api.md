@@ -14,4 +14,6 @@
 
 ::: leitwerk.XNESStatus
 
+::: leitwerk.XNESLearningRates
+
 ::: leitwerk.XNES

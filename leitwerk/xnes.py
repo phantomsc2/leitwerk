@@ -151,6 +151,7 @@ class XNES:
         Args:
             samples: Standardized sample matrix with shape `(dim, n)`.
             ranking: Permutation of sample indices ordered from best to worst.
+            learning_rates: xNES-specific learning rates.
             eps: Numerical stopping threshold.
 
         Returns:

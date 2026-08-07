@@ -95,6 +95,7 @@ Available settings:
 
 - `batch_size`: number of samples per batch / optimizer step
 - `seed`: for reproducible runs
+- `learning_rates`: advanced xNES-specific learning rates
 
 ## 3. Sample a Candidate
 
