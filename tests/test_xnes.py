@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
 import numpy as np
-from leitwerk import XNES, XNESStatus
+import pytest
+from leitwerk import XNES, XNESLearningRates, XNESStatus
 from leitwerk.xnes import _default_eta_scale_shape
 from scipy.linalg import expm
 
@@ -18,6 +21,7 @@ def test_xnes_rank_invariance_under_monotonic_transform() -> None:
     eta_scale_global = 0.8
     eta_scale_shape = 0.2
 
+    learning_rates = XNESLearningRates(eta_mean, eta_scale_global, eta_scale_shape)
     xnes_a = XNES(np.zeros(dim), np.eye(dim))
     xnes_b = XNES(np.zeros(dim), np.eye(dim))
 
@@ -38,20 +42,8 @@ def test_xnes_rank_invariance_under_monotonic_transform() -> None:
         ranking_transformed = _ranking(transformed_scores)
         assert ranking_raw == ranking_transformed
 
-        xnes_a.update(
-            z_a,
-            ranking_raw,
-            eta_mean=eta_mean,
-            eta_scale_global=eta_scale_global,
-            eta_scale_shape=eta_scale_shape,
-        )
-        xnes_b.update(
-            z_b,
-            ranking_transformed,
-            eta_mean=eta_mean,
-            eta_scale_global=eta_scale_global,
-            eta_scale_shape=eta_scale_shape,
-        )
+        xnes_a.update(z_a, ranking_raw, learning_rates)
+        xnes_b.update(z_b, ranking_transformed, learning_rates)
 
     assert np.allclose(xnes_a.mean, xnes_b.mean)
     assert np.allclose(xnes_a.scale, xnes_b.scale)
@@ -84,6 +76,7 @@ def test_xnes_linear_invariance_with_stress_values() -> None:
     )
     shift = np.array([-2.0e9, 4.0e9, -3.0e8], dtype=float)
 
+    learning_rates = XNESLearningRates(eta_mean, eta_scale_global, eta_scale_shape)
     xnes_x = XNES(mean, scale)
     xnes_y = XNES(transform @ mean + shift, transform @ scale)
 
@@ -99,20 +92,8 @@ def test_xnes_linear_invariance_with_stress_values() -> None:
         scores = score_projection @ z_x + 1e-12 * np.arange(n)
         ranking = _ranking(scores)
 
-        status_x = xnes_x.update(
-            z_x,
-            ranking,
-            eta_mean=eta_mean,
-            eta_scale_global=eta_scale_global,
-            eta_scale_shape=eta_scale_shape,
-        )
-        status_y = xnes_y.update(
-            z_y,
-            ranking,
-            eta_mean=eta_mean,
-            eta_scale_global=eta_scale_global,
-            eta_scale_shape=eta_scale_shape,
-        )
+        status_x = xnes_x.update(z_x, ranking, learning_rates)
+        status_y = xnes_y.update(z_y, ranking, learning_rates)
         assert status_x == status_y
 
         assert np.all(np.isfinite(xnes_x.mean))
@@ -171,11 +152,25 @@ def test_xnes_eta_scale_shape_scales_dimension_dependent_shape_rate() -> None:
     assert sign > 0
     expected_B *= np.exp(-logdet / d)
 
-    status = xnes.update(samples, ranking, eta_mean=0.0, eta_scale_global=0.0, eta_scale_shape=0.2)
+    status = xnes.update(
+        samples,
+        ranking,
+        XNESLearningRates(eta_mean=1e-12, eta_scale_global=1e-12, eta_scale_shape=0.2),
+    )
     assert status is XNESStatus.MEAN_STEP_MIN
     assert np.allclose(xnes.mean, np.zeros(3))
     assert np.isclose(xnes.scale_global, 1.0)
     assert np.allclose(xnes.scale_shape, expected_B)
+
+
+@pytest.mark.parametrize("field", ["eta_mean", "eta_scale_global", "eta_scale_shape"])
+def test_xnes_learning_rates_require_positive_values(field: str) -> None:
+    with pytest.raises(ValueError, match=rf"{field} must be > 0"):
+        XNESLearningRates(**{field: 0.0})
+
+    learning_rates = XNESLearningRates()
+    with pytest.raises(FrozenInstanceError):
+        setattr(learning_rates, field, -1.0)
 
 
 def test_xnes_status_classification_partitions_statuses() -> None:

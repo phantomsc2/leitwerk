@@ -7,11 +7,29 @@ generates mirrored orthogonal samples, and applies canonical xNES updates.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum, auto
 
 import numpy as np
 from numpy.linalg import cond, norm
 from scipy.linalg import expm, qr
+
+
+@dataclass(frozen=True, slots=True)
+class XNESLearningRates:
+    """Learning-rate multipliers used by xNES updates."""
+
+    eta_mean: float = 1.0
+    eta_scale_global: float = 0.5
+    eta_scale_shape: float = 0.25
+
+    def __post_init__(self) -> None:
+        if self.eta_mean <= 0.0:
+            raise ValueError("eta_mean must be > 0.")
+        if self.eta_scale_global <= 0.0:
+            raise ValueError("eta_scale_global must be > 0.")
+        if self.eta_scale_shape <= 0.0:
+            raise ValueError("eta_scale_shape must be > 0.")
 
 
 class XNES:
@@ -125,9 +143,7 @@ class XNES:
         self,
         samples: np.ndarray,
         ranking: list[int],
-        eta_mean: float = 1.0,
-        eta_scale_global: float = 1.0,
-        eta_scale_shape: float = 1.0,
+        learning_rates: XNESLearningRates | None = None,
         eps: float = 1e-10,
     ) -> XNESStatus:
         """Apply one xNES update from ranked standardized samples.
@@ -135,9 +151,6 @@ class XNES:
         Args:
             samples: Standardized sample matrix with shape `(dim, n)`.
             ranking: Permutation of sample indices ordered from best to worst.
-            eta_mean: Mean learning-rate override.
-            eta_scale_global: Global-scale learning-rate override.
-            eta_scale_shape: Shape learning-rate multiplier override.
             eps: Numerical stopping threshold.
 
         Returns:
@@ -150,6 +163,8 @@ class XNES:
 
         if self.dim == 0:
             return XNESStatus.SCALE_NORM_MIN
+
+        learning_rates = learning_rates or XNESLearningRates()
 
         samples = _validated_samples(samples, self.dim)
         n = samples.shape[1]
@@ -165,10 +180,10 @@ class XNES:
         grad_scale_global = float(np.trace(grad_M) / d)
         grad_scale_shape = grad_M - grad_scale_global * np.eye(d)
 
-        mean_step = eta_mean * self.scale_global * (self.scale_shape @ grad_mean)
+        mean_step = learning_rates.eta_mean * self.scale_global * (self.scale_shape @ grad_mean)
         self.mean += mean_step
 
-        scale_global_log_step = 0.5 * eta_scale_global * grad_scale_global
+        scale_global_log_step = 0.5 * learning_rates.eta_scale_global * grad_scale_global
         scale_global_log_step = float(np.clip(scale_global_log_step, -50.0, 50.0))
 
         self.scale_global *= float(np.exp(scale_global_log_step))
@@ -180,7 +195,7 @@ class XNES:
         if self.scale_global > 1.0 / eps:
             return XNESStatus.SCALE_GLOBAL_MAX
 
-        eta_scale_shape_eff = eta_scale_shape * _default_eta_scale_shape(d)
+        eta_scale_shape_eff = learning_rates.eta_scale_shape * _default_eta_scale_shape(d)
         self.scale_shape = self.scale_shape @ expm(0.5 * eta_scale_shape_eff * grad_scale_shape)
 
         sign, logdet = np.linalg.slogdet(self.scale_shape)

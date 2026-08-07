@@ -30,7 +30,7 @@ Example:
 from .optimizer import Optimizer, OptimizerReport
 from .schema import Parameter, SchemaDiff, parameter
 from .session import OptimizerSession
-from .xnes import XNES, XNESStatus
+from .xnes import XNES, XNESLearningRates, XNESStatus
 
 __all__ = [
     "Optimizer",
@@ -40,5 +40,6 @@ __all__ = [
     "OptimizerReport",
     "parameter",
     "XNES",
+    "XNESLearningRates",
     "XNESStatus",
 ]
