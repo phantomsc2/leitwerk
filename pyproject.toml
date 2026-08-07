@@ -7,7 +7,7 @@ name = "leitwerk"
 version = "0.7.9"
 description = "Evolutionary strategy with JSON checkpoints and schema reconciliation."
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<3.15"
 dependencies = [
   "numpy>=1.26",
   "scipy>=1.11",
@@ -52,14 +52,12 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
 src = ["leitwerk", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.mypy]
-python_version = "3.11"
 files = ["leitwerk", "tests"]
 disallow_untyped_defs = true
 check_untyped_defs = true
