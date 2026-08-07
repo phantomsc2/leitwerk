@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Any
 
 import leitwerk.session as session_module
+import numpy as np
 import pytest
-from leitwerk import OptimizerSession, SchemaDiff, parameter
+from leitwerk import XNES, OptimizerSession, SchemaDiff, XNESLearningRates, XNESStatus, parameter
 
 from ._optimizer_helpers import _TEST_SEED
 
@@ -112,6 +113,35 @@ class TestSessionPersistence:
             restored.tell(-(params.x**2))
 
         assert _read_batch_size(path) == 4
+
+    def test_session_learning_rates_are_forwarded_and_not_persisted(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        schema = _make_schema("SessionLearningRates", x=(2.0, 1.5))
+        path = tmp_path / "session.json"
+        learning_rates = XNESLearningRates(eta_mean=0.5, eta_scale_global=0.4, eta_scale_shape=0.3)
+        received: list[XNESLearningRates | None] = []
+
+        def fake_update(
+            self: XNES,
+            samples: np.ndarray,
+            ranking: list[int],
+            learning_rates: XNESLearningRates | None = None,
+        ) -> XNESStatus:
+            del self, samples, ranking
+            received.append(learning_rates)
+            return XNESStatus.OK
+
+        monkeypatch.setattr(XNES, "update", fake_update)
+        session = OptimizerSession(path, schema, batch_size=4, learning_rates=learning_rates)
+        for _ in range(4):
+            session.ask()
+            session.tell(0.0)
+
+        assert received == [learning_rates]
+        assert "learning_rates" not in _read_state(path)
 
 
 class TestSessionFailureHandling:

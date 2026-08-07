@@ -14,6 +14,7 @@ import numpy as np
 from .optimizer import Optimizer, OptimizerReport
 from .schema import SchemaDiff
 from .state import JSONLike, JSONObject
+from .xnes import XNESLearningRates
 
 T = TypeVar("T")
 
@@ -27,10 +28,11 @@ class OptimizerSession(Generic[T]):
         schema: type[T] | Mapping[str, object],
         batch_size: int | None = None,
         seed: int | None = None,
+        learning_rates: XNESLearningRates | None = None,
     ) -> None:
 
         session_path = Path(path)
-        optimizer = Optimizer(schema, batch_size=batch_size, seed=seed)
+        optimizer = Optimizer(schema, batch_size=batch_size, seed=seed, learning_rates=learning_rates)
 
         restored = False
         schema_diff = _fresh_schema_diff(cast(Mapping[str, object], optimizer.save()["schema"]))

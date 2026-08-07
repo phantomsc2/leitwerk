@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from leitwerk import XNESStatus
+from leitwerk import XNESLearningRates, XNESStatus
 
 from ._optimizer_helpers import (
     _initialized_optimizer,
@@ -57,8 +57,12 @@ def test_successful_termination_restarts_from_final_mean_with_fresh_scale(
     optimizer = _initialized_optimizer(schema, batch_size=4)
     final_mean = np.array([4.25, -3.5])
 
-    def fake_update(samples: np.ndarray, ranking: list[int]) -> XNESStatus:
-        del samples, ranking
+    def fake_update(
+        samples: np.ndarray,
+        ranking: list[int],
+        learning_rates: XNESLearningRates | None = None,
+    ) -> XNESStatus:
+        del samples, ranking, learning_rates
         optimizer._xnes.mean = final_mean.copy()
         optimizer._xnes.scale_global = 6.0
         optimizer._xnes.scale_shape = np.array([[1.5, 0.2], [0.0, 0.5]])
@@ -93,8 +97,12 @@ def test_failed_termination_restarts_from_schema_mean_with_fresh_scale(monkeypat
     schema = _make_identity_schema("RestartFailure", x=(2.0, 1.5), y=(-1.0, 0.7))
     optimizer = _initialized_optimizer(schema, batch_size=4)
 
-    def fake_update(samples: np.ndarray, ranking: list[int]) -> XNESStatus:
-        del samples, ranking
+    def fake_update(
+        samples: np.ndarray,
+        ranking: list[int],
+        learning_rates: XNESLearningRates | None = None,
+    ) -> XNESStatus:
+        del samples, ranking, learning_rates
         optimizer._xnes.mean = np.array([4.25, -3.5])
         optimizer._xnes.scale_global = 6.0
         optimizer._xnes.scale_shape = np.array([[1.5, 0.2], [0.0, 0.5]])

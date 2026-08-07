@@ -13,7 +13,7 @@ from .schema import SchemaDiff
 from .schema.parser import parse_schema
 from .schema.spec import SchemaSpec
 from .state import JSONLike, JSONObject, restore_optimizer_state, serialize_optimizer_state
-from .xnes import XNES, XNESStatus
+from .xnes import XNES, XNESLearningRates, XNESStatus
 
 T = TypeVar("T")
 
@@ -129,9 +129,11 @@ class Optimizer(Generic[T]):
         schema: type[T] | Mapping[str, object],
         batch_size: int | None = None,
         seed: int | None = None,
+        learning_rates: XNESLearningRates | None = None,
     ) -> None:
         self._batch_size = batch_size
         self._seed = seed
+        self._learning_rates = learning_rates if learning_rates is not None else XNESLearningRates()
         self._schema: SchemaSpec[T] = cast(SchemaSpec[T], parse_schema(schema))
         self._batch_state = _BatchState()
         self._pending_reservation: SampleReservation | None = None
@@ -265,7 +267,7 @@ class Optimizer(Generic[T]):
 
     def _complete_batch(self) -> tuple[XNESStatus, bool]:
         self._num_batches += 1
-        status = self._xnes.update(self._batch_state.batch, self._ranking())
+        status = self._xnes.update(self._batch_state.batch, self._ranking(), self._learning_rates)
         restarted = status.is_terminal
         if restarted:
             self._num_restarts += 1
