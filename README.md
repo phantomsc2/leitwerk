@@ -23,7 +23,7 @@ It offers:
 
 ## Installation
 
-Requires: Python >=3.11,<3.14
+Requires: Python 3.11 - 3.14
 
 ```sh
 pip install leitwerk

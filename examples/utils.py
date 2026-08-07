@@ -38,7 +38,7 @@ def simulate_combat(units: Sequence[Unit], time_horizon: float) -> Mapping[Unit,
 
 def medoid(points: Sequence[Point2]) -> Point2:
     distances = pairwise_distances(points)
-    medoid_index = distances.sum(axis=1).argmin()
+    medoid_index = int(distances.sum(axis=1).argmin())
     return points[medoid_index]
 
 
