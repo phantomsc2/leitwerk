@@ -20,8 +20,11 @@ class XNESLearningRates:
     """Learning-rate multipliers used by xNES updates."""
 
     eta_mean: float = 1.0
+    """Mean learning rate."""
     eta_scale_global: float = 0.5
+    """Covariance scale learning rate."""
     eta_scale_shape: float = 0.25
+    """Covariance shape learning rate."""
 
     def __post_init__(self) -> None:
         if self.eta_mean <= 0.0:
