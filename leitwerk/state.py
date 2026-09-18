@@ -71,7 +71,7 @@ def restore_optimizer_state(
     num_samples, num_batches, num_restarts = _validate_status(_require_field(state_obj, "status"))
 
     schema_diff = schema.diff(saved_schema)
-    mean, scale = _reconcile_distribution_state(saved_names, schema_diff.unchanged, mean, scale, schema)
+    mean, scale, batch = _reconcile_distribution_state(saved_names, schema_diff.unchanged, mean, scale, batch, schema)
     if batch.shape[1] != 0:
         batch = _reconcile_batch_state(saved_names, schema_diff, batch, results, schema)
 
@@ -121,8 +121,9 @@ def _reconcile_distribution_state(
     unchanged_names: list[str],
     mean: np.ndarray,
     scale: np.ndarray,
+    batch: np.ndarray,
     schema: SchemaSpec[object],
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     reconciled_mean, reconciled_scale = schema.initial_distribution()
 
     saved_index = {name: idx for idx, name in enumerate(saved_names)}
@@ -134,14 +135,21 @@ def _reconcile_distribution_state(
     if shared_indices:
         shared_current_indices, shared_saved_indices = zip(*shared_indices, strict=True)
         if len(shared_saved_indices) < len(saved_names):
-            # Marginalize discarded parameters in covariance space, not factor space.
             rows = scale[list(shared_saved_indices), :]
-            shared_scale = np.linalg.cholesky(rows @ rows.T)
+            q, r = np.linalg.qr(rows.T, mode="reduced")
+            signs = np.where(np.diag(r) < 0.0, -1.0, 1.0)
+            q *= signs
+            r *= signs[:, None]
+            shared_scale = r.T
+            # Keep evaluated points: R.T @ (Q.T @ batch) == rows @ batch.
+            # Rows retain their saved indices until schema reconciliation below.
+            batch = batch.copy()
+            batch[list(shared_saved_indices), :] = q.T @ batch
         else:
             shared_scale = scale[np.ix_(shared_saved_indices, shared_saved_indices)]
         reconciled_scale[np.ix_(shared_current_indices, shared_current_indices)] = shared_scale
 
-    return reconciled_mean, reconciled_scale
+    return reconciled_mean, reconciled_scale, batch
 
 
 def _reconcile_batch_state(

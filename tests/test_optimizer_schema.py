@@ -90,7 +90,7 @@ def test_load_reconciles_added_and_removed_parameters() -> None:
     added_partial_state = added.save()
     added_mean = _read_mean(added_partial_state)
     added_scale = _read_scale(added_partial_state)
-    added_batch = _read_batch(added_partial_state)
+    added_batch_latent_points = _read_batch_latent_points(added_partial_state)
     added_results = _read_results(added_partial_state)
     assert any(result is not None for result in added_results)
 
@@ -104,7 +104,7 @@ def test_load_reconciles_added_and_removed_parameters() -> None:
     assert np.allclose(_read_mean(removed_state), added_mean[:2])
     removed_scale = _read_scale(removed_state)
     assert np.allclose(removed_scale @ removed_scale.T, (added_scale @ added_scale.T)[:2, :2])
-    assert np.allclose(_read_batch(removed_state), added_batch[:2, :])
+    assert np.allclose(_read_batch_latent_points(removed_state), added_batch_latent_points[:2, :])
     assert _read_results(removed_state) == added_results
 
 
@@ -123,6 +123,43 @@ def test_load_removal_preserves_surviving_marginal_covariance() -> None:
 
     # Removing y retains its noise contributions to both survivors and their correlation.
     assert np.allclose(covariance, [[10.0, 6.0, 0.0], [6.0, 5.0, 0.0], [0.0, 0.0, 4.0]])
+
+
+@pytest.mark.parametrize("thin_axis", [1.0, 1e-9])
+def test_load_removal_preserves_partial_batch_points_and_results(thin_axis: float) -> None:
+    schema = {name: Parameter(mean=float(i)) for i, name in enumerate(("x", "y", "z"))}
+    original = Optimizer[dict[str, float]](schema, batch_size=6, seed=1)
+    state = original.save()
+    state["scale"] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, thin_axis]]
+    original.load(state)
+    original.ask(context="match")
+    original.tell(42.0)
+    state = original.save()
+    old_points = _read_batch_latent_points(state)
+
+    restored = Optimizer[dict[str, float]]({"z": schema["z"], "x": schema["x"]}, seed=1)
+    restored.load(state)
+    reduced = restored.save()
+    scale = _read_scale(reduced)
+    batch = _read_batch(reduced)
+
+    assert np.all(np.diag(scale) > 0.0)
+    assert np.all(np.isfinite(batch))
+    assert np.allclose(_read_batch_latent_points(reduced), old_points[[2, 0], :], rtol=1e-14, atol=1e-14)
+    assert np.allclose(batch[:, :3], -batch[:, 3:], rtol=1e-14, atol=1e-14)
+    assert _read_results(reduced) == _read_results(state)
+    assert _read_pending_context_matches(reduced) == _read_pending_context_matches(state)
+    assert _read_status(reduced)["num_samples"] == _read_status(state)["num_samples"]
+
+    # The pending mirror is still the same retained point, and the batch remains usable.
+    params = restored.ask(context="match")
+    assert np.allclose([params["z"], params["x"]], old_points[[2, 0], 3])
+    report = restored.tell(41.0)
+    assert report.matched_context
+    for score in range(4):
+        restored.ask()
+        report = restored.tell(float(score))
+    assert report.completed_batch
 
 
 def test_load_reconciles_bounds_changes_and_selectively_preserves_batch() -> None:
@@ -177,7 +214,7 @@ def test_load_reconciles_bounds_changes_and_selectively_preserves_batch() -> Non
             ]
         ),
     )
-    assert np.allclose(changed_batch[1, :], base_batch[1, :])
+    assert np.allclose(_read_batch_latent_points(changed_state)[1, :], _read_batch_latent_points(base_state)[1, :])
     assert np.allclose(changed_batch[0, completed_mask], 0.0)
     assert np.allclose(changed_batch[0, mirror_pending_mask], base_batch[0, mirror_pending_mask])
     assert np.allclose(changed_batch[0, ~mirror_pending_mask], 0.0)
