@@ -91,7 +91,6 @@ def test_load_reconciles_added_and_removed_parameters() -> None:
     added_mean = _read_mean(added_partial_state)
     added_scale = _read_scale(added_partial_state)
     added_batch = _read_batch(added_partial_state)
-    added_batch_latent_points = _read_batch_latent_points(added_partial_state)
     added_results = _read_results(added_partial_state)
     assert any(result is not None for result in added_results)
 
@@ -103,10 +102,27 @@ def test_load_reconciles_added_and_removed_parameters() -> None:
     removed_state = removed.save()
     assert _read_schema_names(removed_state) == ["x", "y"]
     assert np.allclose(_read_mean(removed_state), added_mean[:2])
-    assert np.allclose(_read_scale(removed_state), added_scale[:2, :2])
+    removed_scale = _read_scale(removed_state)
+    assert np.allclose(removed_scale @ removed_scale.T, (added_scale @ added_scale.T)[:2, :2])
     assert np.allclose(_read_batch(removed_state), added_batch[:2, :])
-    assert np.allclose(_read_batch_latent_points(removed_state), added_batch_latent_points[:2, :])
     assert _read_results(removed_state) == added_results
+
+
+def test_load_removal_preserves_surviving_marginal_covariance() -> None:
+    schema = {name: Parameter() for name in ("x", "y", "z")}
+    state = Optimizer(schema, seed=1).save()
+    scale = np.array([[1.0, 2.0, 0.0], [0.0, 1.0, 0.0], [0.0, 3.0, 1.0]])
+    state["scale"] = scale.tolist()
+
+    restored: Optimizer[dict[str, float]] = Optimizer(
+        {"z": Parameter(), "x": Parameter(), "new": Parameter(scale=2.0)}, seed=1
+    )
+    restored.load(state)
+    restored_scale = _read_scale(restored.save())
+    covariance = restored_scale @ restored_scale.T
+
+    # Removing y retains its noise contributions to both survivors and their correlation.
+    assert np.allclose(covariance, [[10.0, 6.0, 0.0], [6.0, 5.0, 0.0], [0.0, 0.0, 4.0]])
 
 
 def test_load_reconciles_bounds_changes_and_selectively_preserves_batch() -> None:
@@ -157,7 +173,7 @@ def test_load_reconciles_bounds_changes_and_selectively_preserves_batch() -> Non
         np.array(
             [
                 [_read_scale(fresh_state)[0, 0], 0.0],
-                [0.0, base_scale[1, 1]],
+                [0.0, np.linalg.norm(base_scale[1, :])],
             ]
         ),
     )

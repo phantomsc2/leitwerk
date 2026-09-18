@@ -133,9 +133,13 @@ def _reconcile_distribution_state(
 
     if shared_indices:
         shared_current_indices, shared_saved_indices = zip(*shared_indices, strict=True)
-        reconciled_scale[np.ix_(shared_current_indices, shared_current_indices)] = scale[
-            np.ix_(shared_saved_indices, shared_saved_indices)
-        ]
+        if len(shared_saved_indices) < len(saved_names):
+            # Marginalize discarded parameters in covariance space, not factor space.
+            rows = scale[list(shared_saved_indices), :]
+            shared_scale = np.linalg.cholesky(rows @ rows.T)
+        else:
+            shared_scale = scale[np.ix_(shared_saved_indices, shared_saved_indices)]
+        reconciled_scale[np.ix_(shared_current_indices, shared_current_indices)] = shared_scale
 
     return reconciled_mean, reconciled_scale
 
