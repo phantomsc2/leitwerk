@@ -33,6 +33,7 @@ benchmark = [
   "coco-experiment>=2.8.2,<3.0.0",
   "cocopp>=2.8.2,<3.0.0",
   "jupyter>=1.1.1",
+  "matplotlib>=3.10.8,<4.0.0",
   "pandas>=3.0.1,<4.0.0",
   "tqdm (>=4.67.3,<5.0.0)",
 ]
@@ -58,7 +59,7 @@ src = ["leitwerk", "tests"]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.mypy]
-files = ["leitwerk", "tests"]
+files = ["leitwerk", "tests", "benchmarks"]
 disallow_untyped_defs = true
 check_untyped_defs = true
 warn_unused_ignores = true

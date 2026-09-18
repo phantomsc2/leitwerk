@@ -209,6 +209,7 @@ __marimo__/
 # COCO
 /notebooks/exdata/
 /notebooks/ppdata/
+/notebooks/runs/
 
 /examples/data/
 /ideas/
