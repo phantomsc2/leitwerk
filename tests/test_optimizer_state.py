@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import cast
 
 import numpy as np
@@ -44,6 +45,42 @@ def test_state_save_load_roundtrip() -> None:
     assert np.allclose(_read_scale(loaded), _read_scale(state)[np.ix_(permutation, permutation)])
     assert _read_results(loaded) == _read_results(state)
     _assert_same_status(_read_status(loaded), _read_status(state))
+    np.testing.assert_allclose(opt_b._xnes.adaptation.paths[0], opt_a._xnes.adaptation.paths[0][permutation])
+    np.testing.assert_allclose(
+        opt_b._xnes.adaptation.paths[2], opt_a._xnes.adaptation.paths[2][np.ix_(permutation, permutation)]
+    )
+
+
+def test_adaptive_checkpoint_continues_the_same_trajectory() -> None:
+    schema = _make_identity_schema("AdaptiveCheckpoint", x=(2.0, 1.0), y=(-3.0, 2.0))
+    original = _optimizer(schema, batch_size=8)
+    for _ in range(83):
+        params = original.ask()
+        original.tell(-(params.x**2 + 3 * params.y**2))
+    checkpoint = json.loads(json.dumps(original.save(), allow_nan=False))
+    restored = _optimizer(schema, batch_size=8)
+    restored.load(checkpoint)
+    assert restored._xnes.adaptation.steps > 5
+    for _ in range(80):
+        first, second = original.ask(), restored.ask()
+        assert first.x == pytest.approx(second.x)
+        assert first.y == pytest.approx(second.y)
+        original.tell(-(first.x**2 + 3 * first.y**2))
+        restored.tell(-(second.x**2 + 3 * second.y**2))
+    np.testing.assert_allclose(original._xnes.adaptation.multipliers, restored._xnes.adaptation.multipliers)
+    np.testing.assert_allclose(original._xnes.scale, restored._xnes.scale)
+
+
+def test_schema_change_resets_adaptation() -> None:
+    schema = _make_identity_schema("BeforeChange", x=(2.0, 1.0))
+    original = _optimizer(schema, batch_size=8)
+    for _ in range(48):
+        params = original.ask()
+        original.tell(-(params.x**2))
+    changed = _optimizer(_make_identity_schema("AfterChange", x=(2.0, 1.0), y=(1.0, 2.0)))
+    changed.load(original.save())
+    assert changed._xnes.adaptation.steps == 0
+    np.testing.assert_array_equal(changed._xnes.adaptation.multipliers, np.ones(3))
 
 
 def test_status_block_exposes_basic_diagnostics_and_roundtrips() -> None:

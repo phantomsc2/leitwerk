@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from itertools import groupby
 from typing import Generic, TypeVar, cast
 
 import numpy as np
@@ -145,7 +146,7 @@ class Optimizer(Generic[T]):
 
     def save(self) -> JSONObject:
         """Serialize the current optimizer state into a JSON-compatible mapping."""
-        return serialize_optimizer_state(
+        state = serialize_optimizer_state(
             status=self._status(),
             mean=self._xnes.mean,
             scale=self._xnes.scale,
@@ -154,12 +155,19 @@ class Optimizer(Generic[T]):
             results=self._batch_state.results,
             pending_context_matches=self._batch_state.pending_context_matches,
         )
+        state["adaptation"] = self._xnes.adaptation.save()
+        return state
 
     def load(self, state: JSONObject) -> SchemaDiff:
-        """Restore optimizer state from a previous snapshot."""
+        """Restore a snapshot, resetting rate adaptation if the schema changes."""
         self._pending_reservation = None
         restored = restore_optimizer_state(state, cast(SchemaSpec[object], self._schema))
         self._xnes = XNES(restored.mean, restored.scale)
+        diff = restored.schema_diff
+        if not (diff.added or diff.removed or diff.changed):
+            saved_names = list(cast(JSONObject, state["schema"]))
+            permutation = [saved_names.index(name) for name in self._schema.names]
+            self._xnes.adaptation.load(cast(JSONObject, state["adaptation"]), permutation)
         self._num_samples = restored.num_samples
         self._num_batches = restored.num_batches
         self._num_restarts = restored.num_restarts
@@ -289,6 +297,9 @@ class Optimizer(Generic[T]):
             "scale_global": self._xnes.scale_global,
             "batch_progress": completed,
             "batch_size": batch_size,
+            "rate_multiplier_mean": float(self._xnes.adaptation.multipliers[0]),
+            "rate_multiplier_scale": float(self._xnes.adaptation.multipliers[1]),
+            "rate_multiplier_shape": float(self._xnes.adaptation.multipliers[2]),
         }
 
     def _reserve(self, context: str | None) -> SampleReservation:
@@ -304,10 +315,11 @@ class Optimizer(Generic[T]):
                 raise RuntimeError(msg)
         return reservation
 
-    def _ranking(self) -> list[int]:
+    def _ranking(self) -> list[list[int]]:
         assert self._batch_state.is_complete()
         results = [cast(tuple[float, ...], item) for item in self._batch_state.results]
-        return sorted(range(len(results)), key=lambda idx: results[idx], reverse=True)
+        ordered = sorted(range(len(results)), key=lambda idx: results[idx], reverse=True)
+        return [list(group) for _, group in groupby(ordered, key=lambda idx: results[idx])]
 
     def _require_idle(self, action: str) -> None:
         if self._pending_reservation is not None:

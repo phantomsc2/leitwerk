@@ -2,29 +2,49 @@
 
 The class maintains the search distribution in factored form
 `scale_global * scale_shape`,
-generates mirrored orthogonal samples, and applies canonical xNES updates.
+generates mirrored orthogonal samples, and applies adaptive exponential updates.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 
 import numpy as np
 from numpy.linalg import cond, norm
-from scipy.linalg import expm, qr
+from scipy.linalg import qr
+
+from ._adaptation import RateAdaptation, ranking_noise
+from ._geometry import gaussian_kl, gradient_spectrum, trust_fraction
 
 
 @dataclass(frozen=True, slots=True)
 class XNESLearningRates:
-    """Learning-rate multipliers used by xNES updates."""
+    """Initial rates and separated, random-ranking-calibrated adaptation.
+
+    Rates adapt independently by default. Set ``adaptive=False`` and
+    ``max_kl=float('inf')`` for the fixed-rate exponential update.
+    """
 
     eta_mean: float = 1.0
     """Mean learning rate."""
     eta_scale_global: float = 0.5
     """Covariance scale learning rate."""
-    eta_scale_shape: float = 0.25
+    eta_scale_shape: float = 0.1
     """Covariance shape learning rate."""
+    adaptive: bool = True
+    """Adapt the three initial rates from temporal natural-gradient consistency."""
+    max_kl: float = 1.0
+    """Maximum isolated KL per block; not a bound on the combined Gaussian KL."""
+    signal_threshold: float = 2.0
+    """Signal power required to increase a rate, relative to random rankings (one)."""
+    evidence_half_life: float = 32.0
+    """Generations for a mean/shape signal's memory to halve; scale power decays twice as fast."""
+    rate_half_life: float = 10.0
+    """Minimum generations to halve a rate under maximal negative feedback."""
+    scale_recovery: float = 5.0
+    """How many times slower the scale rate increases than decreases."""
 
     def __post_init__(self) -> None:
         if self.eta_mean <= 0.0:
@@ -33,6 +53,14 @@ class XNESLearningRates:
             raise ValueError("eta_scale_global must be > 0.")
         if self.eta_scale_shape <= 0.0:
             raise ValueError("eta_scale_shape must be > 0.")
+        if not self.max_kl > 0:
+            raise ValueError("max_kl must be > 0.")
+        if not np.isfinite(self.signal_threshold) or self.signal_threshold <= 1:
+            raise ValueError("signal_threshold must be finite and > 1.")
+        for name in ("evidence_half_life", "rate_half_life", "scale_recovery"):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and > 0.")
 
 
 class XNES:
@@ -55,6 +83,11 @@ class XNES:
         self.mean = np.array(mean0, dtype=float, copy=True)
         self.scale_global: float
         self.scale_shape: np.ndarray
+        self.adaptation = RateAdaptation(self.dim)
+        self.last_kl = 0.0
+        self.step_fractions = np.ones(3)
+        self.block_kl = np.zeros(3)
+        self.effective_rates = np.zeros(3)
 
         if self.dim == 0:
             self.scale_global = 1.0
@@ -137,7 +170,8 @@ class XNES:
             k = end - start
             raw = rng.standard_normal((self.dim, k))
             lengths = norm(raw, axis=0)
-            basis, _ = qr(raw, mode="economic")
+            basis, triangular = qr(raw, mode="economic")
+            basis *= np.where(np.diag(triangular) < 0, -1.0, 1.0)
             z_half[:, start:end] = basis * lengths
 
         return np.hstack([z_half, -z_half])
@@ -145,16 +179,17 @@ class XNES:
     def update(
         self,
         samples: np.ndarray,
-        ranking: list[int],
+        ranking: Sequence[int | Sequence[int]],
         learning_rates: XNESLearningRates | None = None,
         eps: float = 1e-10,
     ) -> XNESStatus:
-        """Apply one xNES update from ranked standardized samples.
+        """Apply one exponential update from ranked standardized samples.
 
         Args:
             samples: Standardized sample matrix with shape `(dim, n)`.
-            ranking: Permutation of sample indices ordered from best to worst.
-            learning_rates: xNES-specific learning rates.
+            ranking: Indices from best to worst, optionally grouped into tied ranks.
+                Members of a tied group receive their average utility.
+            learning_rates: Initial rates, signal calibration, and isolated KL budget per block.
             eps: Numerical stopping threshold.
 
         Returns:
@@ -173,22 +208,53 @@ class XNES:
         samples = _validated_samples(samples, self.dim)
         n = samples.shape[1]
         d = self.dim
-        if len(ranking) != n or sorted(ranking) != list(range(n)):
-            msg = "ranking must be a permutation matching sample count."
-            raise ValueError(msg)
-        w_active = _utility_weights(n)
-        z_sorted = samples[:, ranking]
-
-        grad_mean = z_sorted @ w_active
-        grad_M = (z_sorted * w_active) @ z_sorted.T
-        grad_scale_global = float(np.trace(grad_M) / d)
-        grad_scale_shape = grad_M - grad_scale_global * np.eye(d)
-
-        mean_step = learning_rates.eta_mean * self.scale_global * (self.scale_shape @ grad_mean)
+        weights = _rank_weights(ranking, n)
+        if not np.any(weights):
+            self.step_fractions = np.ones(3)
+            self.block_kl = np.zeros(3)
+            self.effective_rates = np.zeros(3)
+            self.last_kl = 0.0
+            return XNESStatus.OK
+        grad_mean = samples @ weights
+        basis, values = gradient_spectrum(samples, weights)
+        grad_scale_global = float(np.sum(values) / d)
+        rates = np.array(
+            [
+                learning_rates.eta_mean,
+                learning_rates.eta_scale_global,
+                learning_rates.eta_scale_shape * _default_eta_scale_shape(d),
+            ]
+        )
+        if learning_rates.adaptive:
+            rates *= self.adaptation.multipliers
+        local_mean_step = rates[0] * grad_mean
+        limit = learning_rates.max_kl
+        empty = np.empty(0)
+        self.step_fractions = np.array(
+            [
+                min(1.0, np.sqrt(2 * limit / max(float(local_mean_step @ local_mean_step), 1e-300))),
+                trust_fraction(empty, empty, rates[1] * grad_scale_global, d, limit),
+                trust_fraction(empty, rates[2] * (values - grad_scale_global), -rates[2] * grad_scale_global, d, limit),
+            ]
+        )
+        executed = rates * self.step_fractions
+        self.effective_rates = executed.copy()
+        local_mean_step = executed[0] * grad_mean
+        scale_log = executed[1] * grad_scale_global
+        shape_values = executed[2] * (values - grad_scale_global)
+        shape_complement = -executed[2] * grad_scale_global
+        self.block_kl = np.array(
+            [
+                0.5 * float(local_mean_step @ local_mean_step),
+                gaussian_kl(empty, empty, scale_log, d),
+                gaussian_kl(empty, shape_values, shape_complement, d),
+            ]
+        )
+        self.last_kl = gaussian_kl(local_mean_step, shape_values + scale_log, shape_complement + scale_log, d)
+        mean_step = self.scale @ local_mean_step
         self.mean += mean_step
 
-        scale_global_log_step = 0.5 * learning_rates.eta_scale_global * grad_scale_global
-        scale_global_log_step = float(np.clip(scale_global_log_step, -50.0, 50.0))
+        scale_global_log_step = 0.5 * scale_log
 
         self.scale_global *= float(np.exp(scale_global_log_step))
         if not np.isfinite(self.scale_global):
@@ -199,8 +265,22 @@ class XNES:
         if self.scale_global > 1.0 / eps:
             return XNESStatus.SCALE_GLOBAL_MAX
 
-        eta_scale_shape_eff = learning_rates.eta_scale_shape * _default_eta_scale_shape(d)
-        self.scale_shape = self.scale_shape @ expm(0.5 * eta_scale_shape_eff * grad_scale_shape)
+        shape_step = 0.5 * executed[2]
+        self.scale_shape += ((self.scale_shape @ basis) * np.expm1(shape_step * values)) @ basis.T
+        self.scale_shape *= np.exp(-shape_step * grad_scale_global)
+
+        if learning_rates.adaptive:
+            shape_gradient = (basis * values) @ basis.T - grad_scale_global * np.eye(d)
+            self.adaptation.update(
+                [grad_mean, np.array([np.sqrt(d / 2) * grad_scale_global]), shape_gradient / np.sqrt(2)],
+                ranking_noise(samples, weights),
+                rates,
+                np.array([1.0, 1.0, 1.5 * _default_eta_scale_shape(d)]),
+                learning_rates.evidence_half_life,
+                learning_rates.rate_half_life,
+                learning_rates.signal_threshold,
+                learning_rates.scale_recovery,
+            )
 
         sign, logdet = np.linalg.slogdet(self.scale_shape)
         if sign <= 0 or not np.isfinite(logdet):
@@ -321,3 +401,19 @@ def _utility_weights(sample_count: int) -> np.ndarray:
         raise ValueError(msg)
     w_pos /= w_sum
     return w_pos - (1.0 / sample_count)
+
+
+def _rank_weights(ranking: Sequence[int | Sequence[int]], count: int) -> np.ndarray:
+    groups = [[rank] if isinstance(rank, (int, np.integer)) else list(rank) for rank in ranking]
+    indices = [index for group in groups for index in group]
+    if sorted(indices) != list(range(count)) or any(not group for group in groups):
+        raise ValueError("ranking must be a permutation matching sample count.")
+    if len(groups) == 1:
+        return np.zeros(count)
+    utilities = _utility_weights(count)
+    weights = np.empty(count)
+    offset = 0
+    for group in groups:
+        weights[group] = np.mean(utilities[offset : offset + len(group)])
+        offset += len(group)
+    return weights - weights.mean()

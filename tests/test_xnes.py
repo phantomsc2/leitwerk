@@ -166,7 +166,11 @@ def test_xnes_eta_scale_shape_scales_dimension_dependent_shape_rate() -> None:
 @pytest.mark.parametrize("field", ["eta_mean", "eta_scale_global", "eta_scale_shape"])
 def test_xnes_learning_rates_require_positive_values(field: str) -> None:
     with pytest.raises(ValueError, match=rf"{field} must be > 0"):
-        XNESLearningRates(**{field: 0.0})
+        XNESLearningRates(
+            eta_mean=0.0 if field == "eta_mean" else 1.0,
+            eta_scale_global=0.0 if field == "eta_scale_global" else 1.0,
+            eta_scale_shape=0.0 if field == "eta_scale_shape" else 1.0,
+        )
 
     learning_rates = XNESLearningRates()
     with pytest.raises(FrozenInstanceError):

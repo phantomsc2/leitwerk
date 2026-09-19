@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from importlib.metadata import version
-from itertools import product
+from itertools import groupby, product
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Protocol
@@ -23,7 +23,7 @@ from leitwerk.xnes import _default_sample_count
 
 from .problems import NOISE_MODELS, ObservationNoise, Problem, bbob, random_rotation, seed_for
 
-CHECKPOINTS = (100, 300, 1000, 3000, 10000)
+CHECKPOINTS = (100, 300, 1000, 2000, 3000, 10000)
 TARGETS = (1e-1, 1e-2, 1e-3, 1e-5)
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -92,8 +92,9 @@ class XNESAdapter:
         return self.optimizer.transform(self.samples).T
 
     def tell(self, candidates: np.ndarray, values: np.ndarray) -> tuple[str, str]:
-        # Exact ties retain the current implementation's stable index order; do not repair the algorithm here.
-        status = self.optimizer.update(self.samples, np.argsort(values, kind="stable").tolist(), self.learning_rates)
+        ordered = np.argsort(values, kind="stable").tolist()
+        ranking = [list(group) for _, group in groupby(ordered, key=lambda index: values[index])]
+        status = self.optimizer.update(self.samples, ranking, self.learning_rates)
         kind = "running" if status.is_ok else "convergence" if status.is_completion else "numerical_failure"
         return kind, status.name
 
@@ -103,10 +104,26 @@ class XNESAdapter:
             "scale": self.optimizer.scale.copy(),
             "rng_state": self.rng.bit_generator.state,
             "learning_rates": asdict(self.learning_rates or XNESLearningRates()),
+            "adaptation": self.optimizer.adaptation.save(),
         }
 
     def diagnostics(self) -> dict[str, float]:
-        return {**scale_diagnostics(self.optimizer.scale), "scale_global": self.optimizer.scale_global}
+        optimizer = self.optimizer
+        return {
+            **scale_diagnostics(optimizer.scale),
+            "scale_global": optimizer.scale_global,
+            "joint_kl": optimizer.last_kl,
+            **{
+                f"{name}_{block}": float(values[i])
+                for name, values in (
+                    ("rate", optimizer.effective_rates),
+                    ("signal", optimizer.adaptation.signal),
+                    ("trust", optimizer.step_fractions),
+                    ("kl", optimizer.block_kl),
+                )
+                for i, block in enumerate(("mean", "scale", "shape"))
+            },
+        }
 
 
 class CMAAdapter:
